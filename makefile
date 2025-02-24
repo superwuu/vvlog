@@ -24,3 +24,6 @@ $(TARGET): $(OBJS)
 
 clean:
 	-rm -f src/*.o $(TARGET)
+
+vvlog:
+	g++ -g -o vvlog test.cc -lpthread -I./src -L./lib/ -lringlog

@@ -1,225 +1,194 @@
-#ifndef __RING_LOG_H__
-#define __RING_LOG_H__
+#pragma once
 
-#include <stdio.h>
-#include <string.h>
-#include <stdint.h>
-#include <stdlib.h>
+#include <iostream>
+
 #include <pthread.h>
 #include <time.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/time.h>
 #include <sys/types.h>//getpid, gettid
 
-enum LOG_LEVEL
-{
-    FATAL = 1,
+enum LOG_LEVEL{
+    FATAL=1,
     ERROR,
     WARN,
     INFO,
     DEBUG,
-    TRACE,
+    TRACE
 };
 
 extern pid_t gettid();
 
-struct utc_timer
-{
-    utc_timer()
-    {
-        struct timeval tv;
-        gettimeofday(&tv, NULL);
-        //set _sys_acc_sec, _sys_acc_min
-        _sys_acc_sec = tv.tv_sec;
-        _sys_acc_min = _sys_acc_sec / 60;
-        //use _sys_acc_sec calc year, mon, day, hour, min, sec
-        struct tm cur_tm;
-        localtime_r((time_t*)&_sys_acc_sec, &cur_tm);
-        year = cur_tm.tm_year + 1900;
-        mon  = cur_tm.tm_mon + 1;
-        day  = cur_tm.tm_mday;
-        hour  = cur_tm.tm_hour;
-        min  = cur_tm.tm_min;
-        sec  = cur_tm.tm_sec;
-        reset_utc_fmt();
+class Data_buffer{
+public:
+    enum BUFFER_STATUS{
+        FREE,
+        FULL
+    };
+
+    Data_buffer(uint32_t len):_status(FREE),next(nullptr),prev(nullptr),_allsize(len),_usedsize(0){
+        _data=new char[len];
+        if(!_data){
+            exit(1);
+        }
     }
 
-    uint64_t get_curr_time(int* p_msec = NULL)
-    {
+    uint32_t getUsableSize() const{
+        return _allsize-_usedsize;
+    }
+
+    bool empty() const{
+        return _usedsize==0;
+    }
+
+    void append(const char* msg,uint32_t len){
+        if(getUsableSize()<len){
+            return;
+        }
+        memcpy(_data+_usedsize,msg,len);
+        _usedsize+=len;
+    }
+
+    void clear(){
+        _usedsize=0;
+        _status=FREE;
+    }
+
+    void persist(FILE* fp){
+        uint32_t writelen=fwrite(_data,sizeof(char),_usedsize,fp);
+        if(writelen!=_usedsize){
+            fprintf(stderr, "write log to disk error, wt_len %u\n", writelen);
+        }
+    }
+
+    BUFFER_STATUS _status;
+    Data_buffer* next;
+    Data_buffer* prev;
+private:
+    Data_buffer(const Data_buffer&);
+    Data_buffer& operator=(const Data_buffer&);
+
+    uint32_t _allsize;
+    uint32_t _usedsize;
+    char* _data;
+};
+
+
+struct UtcTimer{
+    UtcTimer(){
         struct timeval tv;
-        //get current ts
-        gettimeofday(&tv, NULL);
-        if (p_msec)
-            *p_msec = tv.tv_usec / 1000;
-        //if not in same seconds
-        if ((uint32_t)tv.tv_sec != _sys_acc_sec)
-        {
-            sec = tv.tv_sec % 60;
-            _sys_acc_sec = tv.tv_sec;
-            //or if not in same minutes
-            if (_sys_acc_sec / 60 != _sys_acc_min)
-            {
-                //use _sys_acc_sec update year, mon, day, hour, min, sec
-                _sys_acc_min = _sys_acc_sec / 60;
-                struct tm cur_tm;
-                localtime_r((time_t*)&_sys_acc_sec, &cur_tm);
-                year = cur_tm.tm_year + 1900;
-                mon  = cur_tm.tm_mon + 1;
-                day  = cur_tm.tm_mday;
-                hour = cur_tm.tm_hour;
-                min  = cur_tm.tm_min;
-                //reformat utc format
-                reset_utc_fmt();
+        gettimeofday(&tv,nullptr);
+        _sysAccSec=tv.tv_sec;
+        _sysAccMin=_sysAccSec/60;
+
+        struct tm curTm;
+        localtime_r((time_t*)&_sysAccSec,&curTm);
+        _year=curTm.tm_year+1900;
+        _mon=curTm.tm_min+1;
+        _day=curTm.tm_mday;
+        _hour=curTm.tm_hour;
+        _min=curTm.tm_min;
+        _sec=curTm.tm_sec;
+        resetUtcFmt();
+    }
+
+    uint64_t getCurrTime(int* sec){
+        struct timeval tv;
+        gettimeofday(&tv,nullptr);
+        if(sec){
+            *sec=tv.tv_usec/1000;
+        }
+        if((uint32_t)tv.tv_sec!=_sysAccSec){
+            _sec=tv.tv_sec%60;
+            _sysAccSec=tv.tv_sec;
+            if(_sysAccSec/60!=_sysAccMin){
+                _sysAccMin=_sysAccSec/60;
+                struct tm curTm;
+                localtime_r((time_t*)&_sysAccSec,&curTm);
+                _year=curTm.tm_year+1900;
+                _mon=curTm.tm_min+1;
+                _day=curTm.tm_mday;
+                _hour=curTm.tm_hour;
+                _min=curTm.tm_min;
+                resetUtcFmt();
             }
-            else
-            {
-                //reformat utc format only sec
-                reset_utc_fmt_sec();
+            else{
+                resetUtcFmtSec();
             }
         }
         return tv.tv_sec;
     }
 
-    int year, mon, day, hour, min, sec;
-    char utc_fmt[20];
-
-private:
-    void reset_utc_fmt()
-    {
-        snprintf(utc_fmt, 20, "%d-%02d-%02d %02d:%02d:%02d", year, mon, day, hour, min, sec);
+    void resetUtcFmt(){
+        snprintf(_utcFmt, 20, "%d-%02d-%02d %02d:%02d:%02d", _year, _mon, _day, _hour, _min, _sec);
     }
-    
-    void reset_utc_fmt_sec()
-    {
-        snprintf(utc_fmt + 17, 3, "%02d", sec);
+    void resetUtcFmtSec(){
+        snprintf(_utcFmt+17,3,"%02d",_sec);
     }
 
-    uint64_t _sys_acc_min;
-    uint64_t _sys_acc_sec;
+    int _year,_mon,_day,_hour,_min,_sec;
+    uint64_t _sysAccMin;
+    uint64_t _sysAccSec;
+    char _utcFmt[20];
 };
 
-class cell_buffer
-{
+class Vvlog{
 public:
-    enum buffer_status
-    {
-        FREE,
-        FULL
-    };
-
-    cell_buffer(uint32_t len): 
-    status(FREE), 
-    prev(NULL), 
-    next(NULL), 
-    _total_len(len), 
-    _used_len(0)
-    {
-        _data = new char[len];
-        if (!_data)
-        {
-            fprintf(stderr, "no space to allocate _data\n");
-            exit(1);
-        }
-    }
-
-    uint32_t avail_len() const { return _total_len - _used_len; }
-
-    bool empty() const { return _used_len == 0; }
-
-    void append(const char* log_line, uint32_t len)
-    {
-        if (avail_len() < len)
-            return ;
-        memcpy(_data + _used_len, log_line, len);
-        _used_len += len;
-    }
-
-    void clear()
-    {
-        _used_len = 0;
-        status = FREE;
-    }
-
-    void persist(FILE* fp)
-    {
-        uint32_t wt_len = fwrite(_data, 1, _used_len, fp);
-        if (wt_len != _used_len)
-        {
-            fprintf(stderr, "write log to disk error, wt_len %u\n", wt_len);
-        }
-    }
-
-    buffer_status status;
-
-    cell_buffer* prev;
-    cell_buffer* next;
-
-private:
-    cell_buffer(const cell_buffer&);
-    cell_buffer& operator=(const cell_buffer&);
-
-    uint32_t _total_len;
-    uint32_t _used_len;
-    char* _data;
-};
-
-class ring_log
-{
-public:
-    //for thread-safe singleton
-    static ring_log* ins()
-    {
-        pthread_once(&_once, ring_log::init);
+    static Vvlog* getInstance(){
+        pthread_once(&_once,Vvlog::init);
         return _ins;
     }
-
-    static void init()
-    {
-        while (!_ins) _ins = new ring_log();
+    
+    static void init(){
+        while(!_ins){
+            _ins=new Vvlog();
+        }
     }
 
-    void init_path(const char* log_dir, const char* prog_name, int level);
+    int getLevel() const{
+        return _level;
+    }
 
-    int get_level() const { return _level; }
+    void initPath(const char* logDir,const char* name,int level);
 
     void persist();
 
-    void try_append(const char* lvl, const char* format, ...);
+    void append(const char* level,const char* fmt,...);
 
 private:
-    ring_log();
+    Vvlog();
 
-    bool decis_file(int year, int mon, int day);
+    bool getFile(int year,int mon,int day);
 
-    ring_log(const ring_log&);
-    const ring_log& operator=(const ring_log&);
+private:
+    static Vvlog* _ins;
+    static pthread_once_t _once;
 
-    int _buff_cnt;
-
-    cell_buffer* _curr_buf;
-    cell_buffer* _prst_buf;
-
-    cell_buffer* last_buf;
-
+private:
     FILE* _fp;
-    pid_t _pid;
-    int _year, _mon, _day, _log_cnt;
-    char _prog_name[128];
-    char _log_dir[512];
+    Data_buffer* _currBuf;
+    Data_buffer* _persistBuf;
 
-    bool _env_ok;//if log dir ok
+    pid_t _pid;
+
+    UtcTimer _tm;
+    uint64_t _lastLogTime;
+
+    int _bufferCnt;
+
+    int _year,_mon,_day,_logCnt;
+    char _name[128];
+    char _logDir[512];
+
     int _level;
-    uint64_t _lst_lts;//last can't log error time(s) if value != 0, log error happened last time
-    
-    utc_timer _tm;
+    bool _envOk;
 
     static pthread_mutex_t _mutex;
     static pthread_cond_t _cond;
 
-    static uint32_t _one_buff_len;
+    static uint32_t _bufferSize;
 
-    //singleton
-    static ring_log* _ins;
-    static pthread_once_t _once;
 };
 
 void* be_thdo(void* args);
@@ -235,151 +204,153 @@ void* be_thdo(void* args);
         { \
             mem_lmt = 1024 * 1024 * 1024; \
         } \
-        ring_log::_one_buff_len = mem_lmt; \
+        ring_log::_bufferSize = mem_lmt; \
     } while (0)
 
-#define LOG_INIT(log_dir, prog_name, level) \
+#define LOG_INIT(log_dir,name,level) \
     do \
     { \
-        ring_log::ins()->init_path(log_dir, prog_name, level); \
+        Vvlog::getInstance()->initPath(log_dir,name,level); \
         pthread_t tid; \
-        pthread_create(&tid, NULL, be_thdo, NULL); \
+        pthread_create(&tid,nullptr,be_thdo,nullptr); \
         pthread_detach(tid); \
-    } while (0)
+    }while(0) \
 
-//format: [LEVEL][yy-mm-dd h:m:s.ms][tid]file_name:line_no(func_name):content
-#define LOG_TRACE(fmt, args...) \
+#define LOG_TRACE(fmt,args...) \
     do \
     { \
-        if (ring_log::ins()->get_level() >= TRACE) \
+        if (Vvlog::getInstance()->getLevel() >= TRACE) \
         { \
-            ring_log::ins()->try_append("[TRACE]", "[%u]%s:%d(%s): " fmt "\n", \
+            Vvlog::getInstance()->append("[TRACE]", "[%u]%s:%d(%s): " fmt "\n", \
                     gettid(), __FILE__, __LINE__, __FUNCTION__, ##args); \
         } \
     } while (0)
 
-#define LOG_DEBUG(fmt, args...) \
+#define LOG_DEBUG(fmt,args...) \
     do \
     { \
-        if (ring_log::ins()->get_level() >= DEBUG) \
+        if (Vvlog::getInstance()->getLevel() >= DEBUG) \
         { \
-            ring_log::ins()->try_append("[DEBUG]", "[%u]%s:%d(%s): " fmt "\n", \
+            Vvlog::getInstance()->append("[DEBUG]", "[%u]%s:%d(%s): " fmt "\n", \
                     gettid(), __FILE__, __LINE__, __FUNCTION__, ##args); \
         } \
     } while (0)
 
-#define LOG_INFO(fmt, args...) \
+#define LOG_INFO(fmt,args...) \
     do \
     { \
-        if (ring_log::ins()->get_level() >= INFO) \
+        if (Vvlog::getInstance()->getLevel() >= INFO) \
         { \
-            ring_log::ins()->try_append("[INFO]", "[%u]%s:%d(%s): " fmt "\n", \
+            Vvlog::getInstance()->append("[INFO]", "[%u]%s:%d(%s): " fmt "\n", \
                     gettid(), __FILE__, __LINE__, __FUNCTION__, ##args); \
         } \
     } while (0)
 
-#define LOG_NORMAL(fmt, args...) \
+#define LOG_NORMAL(fmt,args...) \
     do \
     { \
-        if (ring_log::ins()->get_level() >= INFO) \
+        if (Vvlog::getInstance()->getLevel() >= INFO) \
         { \
-            ring_log::ins()->try_append("[INFO]", "[%u]%s:%d(%s): " fmt "\n", \
+            Vvlog::getInstance()->append("[INFO]", "[%u]%s:%d(%s): " fmt "\n", \
                     gettid(), __FILE__, __LINE__, __FUNCTION__, ##args); \
         } \
     } while (0)
 
-#define LOG_WARN(fmt, args...) \
+#define LOG_WARN(fmt,args...) \
     do \
     { \
-        if (ring_log::ins()->get_level() >= WARN) \
+        if (Vvlog::getInstance()->getLevel() >= WARN) \
         { \
-            ring_log::ins()->try_append("[WARN]", "[%u]%s:%d(%s): " fmt "\n", \
+            Vvlog::getInstance()->append("[WARN]", "[%u]%s:%d(%s): " fmt "\n", \
                     gettid(), __FILE__, __LINE__, __FUNCTION__, ##args); \
         } \
     } while (0)
 
-#define LOG_ERROR(fmt, args...) \
+#define LOG_ERROR(fmt,args...) \
     do \
     { \
-        if (ring_log::ins()->get_level() >= ERROR) \
+        if (Vvlog::getInstance()->getLevel() >= ERROR) \
         { \
-            ring_log::ins()->try_append("[ERROR]", "[%u]%s:%d(%s): " fmt "\n", \
+            Vvlog::getInstance()->append("[ERROR]", "[%u]%s:%d(%s): " fmt "\n", \
+                    gettid(), __FILE__, __LINE__, __FUNCTION__, ##args); \
+        } \
+    } while (0)
+
+#define LOG_FATAL(fmt,args...) \
+    do \
+    { \
+        Vvlog::getInstance()->append("[FATAL]", "[%u]%s:%d(%s): " fmt "\n", \
                 gettid(), __FILE__, __LINE__, __FUNCTION__, ##args); \
-        } \
     } while (0)
 
-#define LOG_FATAL(fmt, args...) \
+#define TRACE(fmt,args...) \
     do \
     { \
-        ring_log::ins()->try_append("[FATAL]", "[%u]%s:%d(%s): " fmt "\n", \
-            gettid(), __FILE__, __LINE__, __FUNCTION__, ##args); \
-    } while (0)
-
-#define TRACE(fmt, args...) \
-    do \
-    { \
-        if (ring_log::ins()->get_level() >= TRACE) \
+        if (Vvlog::getInstance()->getLevel() >= TRACE) \
         { \
-            ring_log::ins()->try_append("[TRACE]", "[%u]%s:%d(%s): " fmt "\n", \
+            Vvlog::getInstance()->append("[TRACE]", "[%u]%s:%d(%s): " fmt "\n", \
                     gettid(), __FILE__, __LINE__, __FUNCTION__, ##args); \
         } \
     } while (0)
 
-#define DEBUG(fmt, args...) \
+#define DEBUG(fmt,args...) \
     do \
     { \
-        if (ring_log::ins()->get_level() >= DEBUG) \
+        if (Vvlog::getInstance()->getLevel() >= DEBUG) \
         { \
-            ring_log::ins()->try_append("[DEBUG]", "[%u]%s:%d(%s): " fmt "\n", \
+            Vvlog::getInstance()->append("[DEBUG]", "[%u]%s:%d(%s): " fmt "\n", \
                     gettid(), __FILE__, __LINE__, __FUNCTION__, ##args); \
         } \
     } while (0)
 
-#define INFO(fmt, args...) \
+#define INFO(fmt,args...) \
     do \
     { \
-        if (ring_log::ins()->get_level() >= INFO) \
+        if (Vvlog::getInstance()->getLevel() >= INFO) \
         { \
-            ring_log::ins()->try_append("[INFO]", "[%u]%s:%d(%s): " fmt "\n", \
+            Vvlog::getInstance()->append("[INFO]", "[%u]%s:%d(%s): " fmt "\n", \
                     gettid(), __FILE__, __LINE__, __FUNCTION__, ##args); \
         } \
     } while (0)
 
-#define NORMAL(fmt, args...) \
+#define NORMAL(fmt,args...) \
     do \
     { \
-        if (ring_log::ins()->get_level() >= INFO) \
+        if (Vvlog::getInstance()->getLevel() >= INFO) \
         { \
-            ring_log::ins()->try_append("[INFO]", "[%u]%s:%d(%s): " fmt "\n", \
+            Vvlog::getInstance()->append("[INFO]", "[%u]%s:%d(%s): " fmt "\n", \
                     gettid(), __FILE__, __LINE__, __FUNCTION__, ##args); \
         } \
     } while (0)
 
-#define WARN(fmt, args...) \
+#define WARN(fmt,args...) \
     do \
     { \
-        if (ring_log::ins()->get_level() >= WARN) \
+        if (Vvlog::getInstance()->getLevel() >= WARN) \
         { \
-            ring_log::ins()->try_append("[WARN]", "[%u]%s:%d(%s): " fmt "\n", \
+            Vvlog::getInstance()->append("[WARN]", "[%u]%s:%d(%s): " fmt "\n", \
                     gettid(), __FILE__, __LINE__, __FUNCTION__, ##args); \
         } \
     } while (0)
 
-#define ERROR(fmt, args...) \
+
+#define ERROR(fmt,args...) \
     do \
     { \
-        if (ring_log::ins()->get_level() >= ERROR) \
+        if (Vvlog::getInstance()->getLevel() >= ERROR) \
         { \
-            ring_log::ins()->try_append("[ERROR]", "[%u]%s:%d(%s): " fmt "\n", \
-                gettid(), __FILE__, __LINE__, __FUNCTION__, ##args); \
+            Vvlog::getInstance()->append("[ERROR]", "[%u]%s:%d(%s): " fmt "\n", \
+                    gettid(), __FILE__, __LINE__, __FUNCTION__, ##args); \
         } \
     } while (0)
 
-#define FATAL(fmt, args...) \
+
+#define FATAL(fmt,args...) \
     do \
     { \
-        ring_log::ins()->try_append("[FATAL]", "[%u]%s:%d(%s): " fmt "\n", \
-            gettid(), __FILE__, __LINE__, __FUNCTION__, ##args); \
+        if (Vvlog::getInstance()->getLevel() >= FATAL) \
+        { \
+            Vvlog::getInstance()->append("[FATAL]", "[%u]%s:%d(%s): " fmt "\n", \
+                    gettid(), __FILE__, __LINE__, __FUNCTION__, ##args); \
+        } \
     } while (0)
-
-#endif
